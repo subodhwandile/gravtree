@@ -1,0 +1,94 @@
+\begin{thebibliography}{10}
+
+\bibitem{bender2007cache}
+Michael~A Bender, Martin Farach-Colton, Jeremy~T Fineman, Yonatan~R Fogel,
+  Bradley~C Kuszmaul, and Jelani Nelson.
+\newblock An introduction to {B}$^\epsilon$-trees and write-optimization.
+\newblock In {\em ;login: The USENIX Magazine}, volume~35, 2010.
+
+\bibitem{zenfs}
+Matias Bjorling.
+\newblock {ZenFS}: A storage backend for {RocksDB} on {ZNS} {SSDs}.
+\newblock \url{https://github.com/westerndigitalcorporation/zenfs}, 2021.
+
+\bibitem{zns}
+Matias Bjorling, Abutalib Aghayev, Hans Holmberg, Aravind Ramesh, Geert
+  Du~Plessis, Rafael~Batista Dowsley, and Zvika Guz.
+\newblock Don't be a blockhead: Zoned namespaces make work on conventional
+  {SSDs} obsolete.
+\newblock In {\em USENIX HotStorage}, 2021.
+
+\bibitem{lsm-survey}
+Zhichao Cao, Siying Dong, Sagar Vemuri, and David~HC Du.
+\newblock Characterizing, modeling, and benchmarking {RocksDB} key-value
+  workloads at {Facebook}.
+\newblock In {\em 18th USENIX Conference on File and Storage Technologies
+  (FAST)}, 2020.
+
+\bibitem{spandb}
+Hao Chen, Chaoyi Luo, Yuhao Wang, Shiwen Zhang, Yinan Su, Wenqing Wu, Qing Li,
+  and Yuhao Chen.
+\newblock {SpanDB}: A fast, cost-effective {LSM}-tree based {KV} store on
+  hybrid storage.
+\newblock In {\em 19th USENIX Conference on File and Storage Technologies
+  (FAST)}, 2021.
+
+\bibitem{splinterdb}
+Alex Conway, Abhishek Gupta, Vijay Chidambaram, Martin Farach-Colton, Richard
+  Spillane, Michael~A Bender, and Rob Johnson.
+\newblock {SplinterDB}: Closing the bandwidth gap for {NVMe} key-value stores.
+\newblock In {\em USENIX Annual Technical Conference (ATC)}, 2020.
+
+\bibitem{monkey}
+Niv Dayan, Manos Athanassoulis, and Stratos Idreos.
+\newblock Monkey: Optimal navigable key-value store.
+\newblock In {\em ACM SIGMOD International Conference on Management of Data},
+  2017.
+
+\bibitem{dostoevsky}
+Niv Dayan and Stratos Idreos.
+\newblock Dostoevsky: Better space-time trade-offs for {LSM}-tree based
+  key-value stores via adaptive removal of superfluous merging.
+\newblock In {\em ACM SIGMOD International Conference on Management of Data},
+  2018.
+
+\bibitem{leveldb}
+Jeff Dean and Sanjay Ghemawat.
+\newblock {LevelDB}.
+\newblock \url{https://github.com/google/leveldb}, 2011.
+
+\bibitem{rocksdb}
+{Facebook}.
+\newblock {RocksDB}: A persistent key-value store for fast storage
+  environments.
+\newblock \url{https://rocksdb.org}, 2013.
+
+\bibitem{bloom}
+Adam Kirsch and Michael Mitzenmacher.
+\newblock Less hashing, same performance: Building a better {Bloom} filter.
+\newblock {\em Random Structures \& Algorithms}, 33(2):187--218, 2008.
+
+\bibitem{wisckey}
+Lanyue Lu, Thanumalayan~Sankaranarayana Pillai, Hariharan Gopalakrishnan,
+  Andrea~C Arpaci-Dusseau, and Remzi~H Arpaci-Dusseau.
+\newblock {WiscKey}: Separating keys from values in {SSD}-conscious storage.
+\newblock In {\em USENIX Conference on File and Storage Technologies (FAST)},
+  2016.
+
+\bibitem{oneil1996lsm}
+Patrick O'Neil, Edward Cheng, Dieter Gawlick, and Elizabeth O'Neil.
+\newblock The log-structured merge-tree ({LSM}-tree).
+\newblock {\em Acta Informatica}, 33(4):351--385, 1996.
+
+\bibitem{pebblesdb}
+Pandian Raju, Rohan Kadekodi, Vijay Chidambaram, and Ittai Abraham.
+\newblock {PebblesDB}: Building key-value stores using fragmented
+  log-structured merge trees.
+\newblock In {\em ACM Symposium on Operating Systems Principles (SOSP)}, 2017.
+
+\bibitem{libzbd}
+{Western Digital}.
+\newblock libzbd: A library to control zoned block devices.
+\newblock \url{https://github.com/westerndigitalcorporation/libzbd}, 2020.
+
+\end{thebibliography}

@@ -1,0 +1,792 @@
+\documentclass[10pt,twocolumn]{article}
+
+% ── Packages ──────────────────────────────────────────────────────────────────
+\usepackage[margin=1in,columnsep=0.25in]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage[hidelinks]{hyperref}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{cite}
+\usepackage{url}
+\usepackage{balance}
+\usepackage{parskip}
+\usepackage{enumitem}
+
+% tighter list spacing
+\setlist{itemsep=2pt,topsep=3pt}
+
+% theorem environments
+\newtheorem{theorem}{Theorem}
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{proposition}[theorem]{Proposition}
+
+% ── Title ─────────────────────────────────────────────────────────────────────
+\title{\textbf{GravTree: A Local-Compaction Tree\\
+       for Predictable Write Latency}}
+
+\author{
+  Subodh Wandile \\
+  Independent Researcher, India \\
+  \texttt{sawandile\_b17@it.vjti.ac.in}
+}
+
+\date{}
+
+% ──────────────────────────────────────────────────────────────────────────────
+\begin{document}
+\maketitle
+
+% ── Abstract ──────────────────────────────────────────────────────────────────
+\begin{abstract}
+Log-Structured Merge-trees (LSM-trees), the dominant write-optimised storage
+engine, exhibit tail write latency that is difficult to bound because
+compaction work is scheduled globally across levels.  We present
+\textbf{GravTree}, a tree-structured key-value index in which every node is an
+immutable Sorted String Table (SSTable) file and compaction is strictly
+\emph{local}: a single compaction event involves exactly one parent node and
+its direct children, and nothing else.  This invariant bounds the I/O of any
+single compaction event to $O(K \cdot B)$ bytes---a constant independent of
+dataset size---so that the maximum work done between any two writes is fixed
+by configuration rather than by data volume.
+
+Writes land in an in-memory skip-list at the root; the critical write path
+performs no disk I/O.  A dedicated background thread runs LocalFlush to push
+data from the root buffer down the tree, splitting leaves and internal nodes
+as they fill.  We implement a complete C++17 prototype featuring per-node Bloom
+filters, a crash-safe atomic manifest with garbage collection of superseded
+nodes, and a two-level lock design that allows concurrent reads during
+flushes.
+
+We evaluate the prototype against RocksDB~11.8 at $N = 10$M operations per
+workload under equal durability settings (no WAL on either engine).  GravTree
+achieves 1.3--2.6$\times$ lower p99 latency on all four workloads and a
+predictable tail: p99.99 write latency stays below 20\,$\mu$s, versus
+31--2117\,$\mu$s for RocksDB.  Point reads are 2.6$\times$ faster at p99 and
+2.4$\times$ higher in throughput.  The price is write throughput: the current
+single-threaded flush design rewrites whole nodes on every LocalFlush and
+sustains 21--80$\times$ fewer writes per second than RocksDB.  We quantify
+this trade-off, and discuss how GravTree's immutable, sequentially-written
+node files are structurally compatible with Zoned Namespace (ZNS) SSDs.
+\end{abstract}
+
+% ── 1. Introduction ───────────────────────────────────────────────────────────
+\section{Introduction}
+\label{sec:intro}
+
+Write-optimised storage engines power the data layer of cloud databases,
+time-series stores, and messaging systems.  The dominant design,
+the Log-Structured Merge-tree (LSM-tree)~\cite{oneil1996lsm}, achieves high
+write throughput by buffering writes in memory and periodically merging
+sorted runs on disk.  Systems including RocksDB~\cite{rocksdb},
+LevelDB~\cite{leveldb}, Cassandra, and TiKV all build on this foundation.
+
+The central cost of the LSM design is \emph{compaction}: a background process
+that reads files from level $L_i$, merges them with overlapping files from
+level $L_{i+1}$, and writes out a new set of $L_{i+1}$ files.  Compaction
+can cascade---a newly enlarged $L_{i+1}$ triggers further compaction into
+$L_{i+2}$, and so on---so the I/O cost of a single compaction event is
+proportional to the sizes of all affected levels.  When the write rate
+outpaces compaction throughput, RocksDB stalls or throttles incoming writes
+until compaction catches up.  These stall events are well-documented in
+production deployments~\cite{lsm-survey,dostoevsky}: p99.9 write latency
+routinely spikes 100$\times$--1000$\times$ above median.
+
+Efforts to tame compaction have focused on reducing \emph{write
+amplification}~\cite{wisckey,pebblesdb,dostoevsky,monkey} or restructuring
+the level hierarchy~\cite{pebblesdb}, but none bound the \emph{duration} of
+a single compaction event to a constant independent of dataset size.
+
+\textbf{GravTree} is built around a single invariant that does exactly this:
+
+\begin{quote}
+\textit{A LocalFlush involves exactly one parent node and its direct
+children---no other nodes are read or written.}
+\end{quote}
+
+Every node in GravTree is an immutable SSTable file.  Incoming writes
+accumulate in an in-memory skip list at the root.  When the buffer exceeds a
+configurable soft threshold, a background thread runs LocalFlush: it
+partitions the buffer by child key ranges, merge-sorts each partition with the
+corresponding child's on-disk data, writes new immutable child files, and
+invalidates the old ones.  The total I/O per flush is $O(K \cdot B)$ bytes
+where $K$ is the fanout ($\leq 8$) and $B$ is the buffer threshold---a bounded
+constant.  Writers block only if the buffer reaches a hard limit of twice
+the threshold before the flush completes.
+
+GravTree is closest in spirit to the B$^\epsilon$-tree~\cite{bender2007cache}
+and its high-performance descendant SplinterDB~\cite{splinterdb}, which also
+propagate writes downward through per-node buffers.  The key difference is our
+storage model: every GravTree node is a complete, immutable SSTable (not a
+mutable fixed-size block).  This enables per-node Bloom filters with no
+staleness concern, deterministic crash recovery via atomic file rename, and a
+natural mapping onto ZNS SSDs where each node occupies one sequentially-written
+zone.
+
+\textbf{Contributions.}
+\begin{enumerate}
+  \item The GravTree data model and LocalFlush algorithm, with a formal bound
+        on per-flush I/O cost and a recursive split rule that keeps every node
+        within a configured size as the tree grows (\S\ref{sec:design}).
+  \item A complete C++17 implementation with skip-list write buffer, per-node
+        Bloom filters, sparse index, CRC-64 integrity, atomic manifest, and
+        manifest-driven garbage collection, validated at 10M keys for
+        completeness and crash-restart consistency (\S\ref{sec:impl}).
+  \item An empirical evaluation at $N = 10$M operations against RocksDB~11.8
+        showing 1.3--2.6$\times$ lower p99 latency on all workloads and a
+        p99.99 write tail below 20\,$\mu$s, together with an honest
+        measurement of the write-throughput and write-amplification cost of
+        the design (\S\ref{sec:eval}).
+  \item A structural analysis of why GravTree's immutable node model is a
+        natural fit for ZNS SSDs (\S\ref{sec:zns}).
+\end{enumerate}
+
+% ── 2. Background ─────────────────────────────────────────────────────────────
+\section{Background and Motivation}
+\label{sec:background}
+
+\subsection{LSM-Trees}
+
+An LSM-tree organises data as a sequence of levels $L_0, L_1, \ldots, L_k$.
+Writes accumulate in an in-memory MemTable; when full, the MemTable is flushed
+as an immutable SSTable to $L_0$.  When $L_0$ accumulates enough files, a
+compaction job merges them with overlapping $L_1$ files to produce new $L_1$
+files.  This repeats recursively: a sufficiently large $L_i$ triggers
+compaction into $L_{i+1}$.
+
+The total I/O cost of a compaction at level $L_i$ is proportional to the sizes
+of all files read and written at levels $L_i$ and $L_{i+1}$, which can be
+several GB.  When the write rate exceeds the compaction throughput on the
+available I/O bandwidth, RocksDB imposes a write delay (soft limit) or
+halts writes entirely (hard limit) until compaction catches up.  The
+resulting latency spikes are unbounded in duration---they last as long as
+the I/O subsystem needs to drain the backlog.
+
+\subsection{\texorpdfstring{B$^\epsilon$-Trees}{B-epsilon Trees}}
+
+The B$^\epsilon$-tree~\cite{bender2007cache} routes writes as
+``messages'' through internal node buffers, batching them before pushing
+to children.  A flush operation moves a buffer's worth of messages one
+level down, amortising I/O across many logical writes.  The flush scope
+is bounded to a single parent-child edge, which is the same locality
+property exploited by GravTree.
+
+SplinterDB~\cite{splinterdb} is the state-of-the-art B$^\epsilon$-tree
+implementation, achieving write throughput competitive with RocksDB while
+offering better tail latency.  GravTree differs from SplinterDB in two ways:
+(1) nodes are immutable SSTable files rather than mutable B-tree pages, so
+crash recovery requires only an atomic manifest update and no write-ahead log
+for tree structure; and (2) per-node Bloom filters are always consistent with
+the on-disk content, since a node's entries never change after it is written.
+
+\subsection{The Stall Characterisation Problem}
+
+A key question is: \textit{what bounds the worst-case duration of a single
+compaction event?}  For an LSM-tree at level $L_i$ with $S_i$ bytes of data,
+the answer is $\Theta(S_i + S_{i+1})$, which grows with the dataset.  For
+GravTree, the answer is $O(K \cdot B)$ regardless of dataset size.  This
+is the fundamental architectural difference that GravTree exploits.
+
+\subsection{Zoned Namespace SSDs}
+
+ZNS SSDs~\cite{zns} replace the conventional block interface with a set of
+\emph{zones} that must be written sequentially and explicitly reset before
+reuse.  This eliminates the device-level Flash Translation Layer (FTL) and
+its associated garbage collection overhead.  Existing storage engines adapted
+for ZNS (e.g., ZenFS~\cite{zenfs}) still inherit the multi-level compaction
+behaviour of their host engine.  GravTree's append-only node model aligns
+structurally with ZNS requirements without requiring an adaptation layer.
+
+% ── 3. Design ─────────────────────────────────────────────────────────────────
+\section{GravTree Design}
+\label{sec:design}
+
+\subsection{Data Model}
+
+GravTree is a $K$-ary tree of \emph{nodes}.  Each node $v$ stores:
+\begin{itemize}
+  \item A non-negative \emph{level} $\ell(v)$; level 0 denotes a leaf.
+  \item An immutable \emph{SSTable file} containing a sorted sequence of
+        entries $\langle \mathit{key},\, \mathit{value},\, \mathit{seq},\,
+        \mathit{deleted} \rangle$.
+  \item References to at most $K$ child nodes, each covering a disjoint
+        key sub-range.
+  \item A Bloom filter and sparse index embedded in the SSTable file.
+  \item A \emph{key range} $[\mathit{min\_key},\, \mathit{max\_key}]$
+        covering all keys in the subtree rooted at $v$.
+\end{itemize}
+
+The \emph{root node} additionally maintains an in-memory skip-list write
+buffer that absorbs all incoming writes without disk I/O.  A global
+\emph{manifest} file records the set of valid nodes and the current root ID.
+
+\subsection{Write Path}
+
+\begin{algorithm}[t]
+\caption{Insert($key$, $value$)}
+\label{alg:insert}
+\begin{algorithmic}[1]
+\If{$\mathrm{buf.bytes}() \geq \mathrm{hardLimit}$}
+  \State \Call{WaitForFlush}{} \Comment{back-pressure; rarely taken}
+\EndIf
+\State $e \gets \langle key,\ value,\ \mathrm{NextSeq}(),\ \mathrm{false} \rangle$
+\State $\mathrm{buf.Insert}(e)$ \Comment{$O(\log n)$, no disk I/O}
+\If{$\mathrm{buf.bytes}() \geq \mathrm{softThreshold}$}
+  \State \Call{SignalFlushThread}{}
+\EndIf
+\end{algorithmic}
+\end{algorithm}
+
+Algorithm~\ref{alg:insert} shows the write path.  The only critical-path work
+is a skip-list insert ($O(\log n)$) into DRAM.  A dedicated background thread
+is signalled when the buffer exceeds a soft threshold (default 4\,MB); the
+thread drains the buffer without blocking writers.  Writers block only at the
+hard limit (default $2\times$ soft threshold), which is never reached under
+normal sustained write rates.
+
+The skip list orders entries by $(\mathit{key}\ \mathrm{asc},\,
+\mathit{seq}\ \mathrm{desc})$, so the most recent version of a key is always
+the first encountered during lookup.
+
+\subsection{LocalFlush}
+
+\begin{algorithm}[t]
+\caption{LocalFlush(root $r$)}
+\label{alg:flush}
+\begin{algorithmic}[1]
+\State $E \gets \mathrm{buf.ToSortedVector}()$;\ $\mathrm{buf.Clear}()$
+\State Partition $E$ into $E_1, \ldots, E_K$ by child key ranges
+\For{$i \gets 1$ \textbf{to} $K$}
+  \State $E'_i \gets \mathrm{Merge}(E_i,\ \mathrm{Load}(c_i))$ \Comment{two-way merge-sort}
+  \State $c'_i \gets \mathrm{WriteSSTable}(E'_i)$ \Comment{new immutable file}
+  \State $\mathrm{Invalidate}(c_i)$ \Comment{old file now garbage}
+\EndFor
+\State Update child pointers in $r$
+\State $\mathrm{AtomicManifestSave}()$
+\end{algorithmic}
+\end{algorithm}
+
+Algorithm~\ref{alg:flush} is the core operation.  Its I/O cost is bounded:
+
+\begin{proposition}
+\label{prop:io}
+A single LocalFlush reads and writes at most
+$B + K \cdot C_{\max}$ bytes, where $B$ is the root buffer size and
+$C_{\max}$ is the size of the largest child SSTable.  Both $B$ and
+$C_{\max}$ are bounded by configuration constants independent of the
+total dataset size $N$.
+\end{proposition}
+
+\textbf{Merge semantics.}  Entries from the write buffer and from a child
+SSTable are merged by $(\mathit{key}\ \mathrm{asc},\, \mathit{seq}\
+\mathrm{desc})$.  For any key, only the entry with the highest
+$\mathit{seq}$ is retained in the output.  A tombstone entry
+($\mathit{deleted} = \mathrm{true}$) suppresses all earlier versions of
+its key.
+
+\subsection{Leaf Split}
+
+When the root is a childless leaf and its buffer reaches the soft threshold, a
+leaf split creates two new leaf SSTables and a new internal root:
+
+\begin{enumerate}[leftmargin=1.5em]
+  \item Sort the write buffer; choose the median key as the fence key.
+  \item Write the left and right halves as two new leaf SSTable files.
+  \item Create a new internal root referencing both leaves.
+  \item Atomically update the manifest.
+\end{enumerate}
+
+The old leaf file is invalidated and can be reclaimed.
+
+\subsection{Read Path}
+
+\begin{algorithm}[t]
+\caption{Get($key$)}
+\label{alg:get}
+\begin{algorithmic}[1]
+\If{$e \gets \mathrm{buf.FindKey}(key)$} \Comment{$O(\log n)$, DRAM only}
+  \State \textbf{return} $e.\mathrm{deleted}\ ?\ \bot\ :\ e.\mathrm{value}$
+\EndIf
+\State $\mathit{path} \gets \mathrm{FindPath}(key)$ \Comment{root-to-leaf traversal}
+\For{each node $v$ \textbf{in} $\mathit{path}$}
+  \If{$v.\mathrm{MightContain}(key)$} \Comment{Bloom filter}
+    \If{$e \gets v.\mathrm{BinarySearch}(key)$}
+      \State \textbf{return} $e.\mathrm{deleted}\ ?\ \bot\ :\ e.\mathrm{value}$
+    \EndIf
+  \EndIf
+\EndFor
+\State \textbf{return} $\bot$
+\end{algorithmic}
+\end{algorithm}
+
+The read path (Algorithm~\ref{alg:get}) first checks the in-memory skip list
+in $O(\log n)$.  If not found, it traverses the root-to-leaf path, using each
+node's Bloom filter to skip nodes unlikely to contain the key, then performs a
+binary search within the node's sparse-indexed SSTable.
+
+\subsection{Complexity}
+
+Let $n$ be the number of entries in the write buffer, $B$ the buffer threshold
+in bytes, $K$ the fanout, and $H = O(\log_K (N/B))$ the tree height for
+a dataset of $N$ entries.
+
+\begin{itemize}
+  \item \textbf{Write (amortised):} $O(\log n)$ --- skip-list insert, DRAM
+        only.
+  \item \textbf{LocalFlush I/O:} $O(K \cdot B)$ bytes --- bounded constant
+        (Proposition~\ref{prop:io}).
+  \item \textbf{Point read:} $O(H \cdot \log n_v)$ disk reads in the worst
+        case, where $n_v$ is the number of entries per node; Bloom filters
+        reduce the effective constant dramatically in practice.
+  \item \textbf{Write amplification:} Each entry is rewritten once per tree
+        level it descends through, giving write amplification $\leq H =
+        O(\log_K (N/B))$---the same asymptotic bound as a B$^\epsilon$-tree.
+\end{itemize}
+
+% ── 4. Implementation ─────────────────────────────────────────────────────────
+\section{Implementation}
+\label{sec:impl}
+
+The GravTree prototype is approximately 1,500 lines of C++17, open-sourced
+under the AGPL license.  We describe the key implementation decisions.
+
+\subsection{Skip-List Write Buffer}
+
+The write buffer is a probabilistic skip list with maximum height 12 and
+branching probability $p = 1/4$, matching the parameters used in LevelDB's
+MemTable~\cite{leveldb}.  Compared to a sorted \texttt{std::vector}, the skip
+list eliminates the $O(n)$ element-shifting cost on insert, which was the
+dominant bottleneck in our earlier vector-based prototype and caused a 5$\times$
+write latency disadvantage at high buffer occupancy.
+
+\subsection{SSTable File Format}
+
+Each node file is written once and never modified.  Its layout is:
+
+\begin{center}
+\small
+\begin{tabular}{ll}
+\toprule
+Section & Size \\
+\midrule
+Magic number + version & 12 B \\
+Header (id, level, num\_children, \ldots) & 64 B \\
+Child ID array ($\leq 16$ entries) & 128 B \\
+Bloom filter (serialised bit-array) & variable \\
+Sorted entries (key, value, seq, deleted) & variable \\
+Sparse index (every 128\textsuperscript{th} key + file offset) & variable \\
+CRC-64 checksum (covers all preceding bytes) & 8 B \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Files are written atomically via a temporary file renamed into place, ensuring
+that a partially-written file is never visible as a valid node.
+
+\subsection{Bloom Filters}
+
+Each on-disk node carries a Bloom filter targeting a 1\% false-positive rate,
+built using MurmurHash3-128 with the Kirsch-Mitzenmacher double-hashing
+technique~\cite{bloom}.  Filters are serialised into the SSTable file and
+loaded lazily on first access.
+
+One subtlety: the root node's in-memory write buffer grows after the Bloom
+filter was last serialised, so the filter may not reflect recently buffered
+keys.  We handle this by bypassing the Bloom check for any node that has a
+non-empty in-memory buffer, falling back to a full binary search.  Once a node
+is flushed and its buffer is empty, the Bloom filter is authoritative.
+
+\subsection{Manifest and Crash Safety}
+
+A text-format manifest records: the set of valid node files with their IDs,
+levels, and paths; the current root ID; and a monotonically increasing
+next-node-ID counter.  All manifest mutations are performed via write-to-temp
++ rename, so the manifest is always either the old or new state---never
+partially updated.
+
+On restart, GravTree reads the manifest, ignores any node file whose CRC-64
+check fails, and loads the root node into the in-memory node cache.
+
+\textbf{Durability limitation.}  The current prototype does not maintain a
+write-ahead log (WAL) for the in-memory write buffer.  A crash before
+\texttt{flush()} is called will lose any writes buffered since the last flush.
+Adding a WAL or making the skip list itself persistent (e.g., via NVM) is
+straightforward future work.
+
+\subsection{Concurrency Model}
+
+GravTree uses a two-level lock hierarchy to separate the hot write path from
+the tree-structure path:
+
+\begin{itemize}
+  \item \textbf{\texttt{write\_buf\_mu}} (\texttt{std::mutex}): guards the
+        skip-list write buffer.  Held only for the duration of a skip-list
+        insert---$O(\log n)$ DRAM operations, no disk I/O.  This is the only
+        lock on the critical write path.
+  \item \textbf{\texttt{cache\_mu}} (\texttt{std::shared\_mutex}): guards the
+        node cache and tree structure.  The background flush thread acquires
+        an exclusive lock while modifying tree structure; concurrent readers
+        (\texttt{get}, \texttt{range\_scan}) hold a shared lock, permitting
+        parallel reads.
+\end{itemize}
+
+The two locks are never held simultaneously, ruling out deadlock.  The flush
+thread releases \texttt{cache\_mu} before writing SSTable files to disk, so
+disk I/O does not block readers.
+
+% ── 5. Evaluation ─────────────────────────────────────────────────────────────
+\section{Evaluation}
+\label{sec:eval}
+
+\subsection{Experimental Setup}
+
+\textbf{Hardware.}  All experiments run on a Linux x86\_64 virtual machine
+with 8 vCPUs (Intel Xeon Platinum 8559C), 31\,GB RAM, no swap, and a 124\,GB
+NVMe-backed virtual disk (ext4), running Ubuntu 22.04.5 LTS.  Both engines
+write to the same filesystem.
+
+\textbf{Software.}  GravTree is built with GCC in Release mode
+(\texttt{-O3}).  We compare against RocksDB~11.8.1 built from source with the
+same compiler.
+
+\textbf{Configuration.}  Both engines use a 4\,MB write buffer.  RocksDB is
+configured with \texttt{kNoCompression}, \texttt{max\_write\_buffer\_number}
+$= 3$, one background compaction thread and one background flush thread.
+GravTree uses fanout $K = 8$ (\texttt{MAX\_FANOUT} $= 16$ for internal nodes)
+and hard-limit factor 2.0.  \emph{Durability is equalised}: the GravTree
+prototype has no write-ahead log, so RocksDB is run with
+\texttt{disableWAL = true}.  Both engines therefore offer the same guarantee
+(buffered writes are lost on crash) and neither pays a per-write log
+\texttt{fsync}.
+
+\textbf{Methodology.}  Each workload performs $N = 10{,}000{,}000$ operations
+with 100-byte values and 20-byte zero-padded decimal keys.  Latency is
+measured per-operation with \texttt{std::chrono::high\_resolution\_clock};
+results are reported as sorted percentiles with no warm-up exclusion.
+Throughput is wall-clock operations per second over the timed loop
+\emph{including} the closing \texttt{flush()}, so it reflects the total cost
+of making all $N$ writes persistent.  Before benchmarking, a separate
+verification harness inserted 1M keys, read every key back, closed the
+engine, re-opened it from the manifest, and read every key again; all reads
+returned the correct value (0 missing, 0 mismatched).
+
+\subsection{Workloads}
+
+\begin{itemize}
+  \item \textbf{SeqWrite}: Keys $0, 1, \ldots, N{-}1$ in order.
+  \item \textbf{RandWrite}: Keys drawn uniformly at random from $[0, 2N)$.
+  \item \textbf{PointRead}: Dataset pre-filled with $N/10 = 1$M sequential
+        keys ($\approx 120$\,MB, 30$\times$ the write buffer, so most reads go
+        to disk); $N$ random point lookups.
+  \item \textbf{Mixed}: $N/2$ sequential keys pre-inserted; $N$ operations
+        alternating random reads and appending writes.
+\end{itemize}
+
+\subsection{Write Latency}
+
+\begin{table}[t]
+\centering
+\footnotesize
+\caption{Write latency ($\mu$s) and throughput at $N = 10$M.
+\textbf{Bold} = lower latency.  Ratio $>1$ favours GravTree.}
+\label{tab:write}
+\begin{tabular}{lrrrrr}
+\toprule
+ & p50 & p99 & p99.9 & p99.99 & Mops/s \\
+\midrule
+\multicolumn{6}{l}{\textit{SeqWrite}} \\
+GravTree & \textbf{0.26} & \textbf{0.80} & \textbf{1.72} & \textbf{9.2} & 0.067 \\
+RocksDB  & 0.62 & 1.28 & 5.45 & 31.4 & \textbf{1.439} \\
+Ratio    & 2.4$\times$ & 1.6$\times$ & 3.2$\times$ & 3.4$\times$ & 0.047$\times$ \\
+\midrule
+\multicolumn{6}{l}{\textit{RandWrite}} \\
+GravTree & \textbf{0.72} & \textbf{2.43} & \textbf{7.21} & \textbf{17.3} & 0.003 \\
+RocksDB  & 1.08 & 3.20 & 1061.6 & 2116.7 & \textbf{0.232} \\
+Ratio    & 1.5$\times$ & 1.3$\times$ & 147$\times$$^\ddagger$ & 122$\times$$^\ddagger$ & 0.013$\times$ \\
+\midrule
+\multicolumn{6}{l}{\textit{Mixed (50/50)}} \\
+GravTree & \textbf{1.54} & \textbf{4.33} & \textbf{9.91} & \textbf{19.2} & 0.103 \\
+RocksDB  & 2.43 & 9.81 & 17.25 & 83.0 & \textbf{0.309} \\
+Ratio    & 1.6$\times$ & 2.3$\times$ & 1.7$\times$ & 4.3$\times$ & 0.33$\times$ \\
+\bottomrule
+\multicolumn{6}{p{0.95\linewidth}}{{\footnotesize $^\ddagger$RocksDB's RandWrite
+p99.9/p99.99 are dominated by a single write stall (1--4\,ms per operation)
+confined to the final $\approx$40K operations; see \S\ref{sec:timeseries}.}}
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:write} shows write latency and throughput.  At p50 GravTree is
+1.5--2.4$\times$ faster: a write is a skip-list insert into DRAM
+($\approx 0.26\,\mu$s), whereas RocksDB's memtable insert plus write-group
+coordination costs $\approx 0.6$--$1.1\,\mu$s.  With the WAL disabled on both
+engines this gap is purely in-memory overhead, not durability cost.
+
+At p99, GravTree's advantage is 1.3--2.3$\times$.  At p99.9 and p99.99 the
+picture is qualitatively different: GravTree's tail stays below 20\,$\mu$s on
+every write workload, whereas RocksDB's p99.99 ranges from 31\,$\mu$s
+(SeqWrite) to 2.1\,ms (RandWrite).  The RandWrite outlier is a RocksDB write
+stall, not steady-state behaviour: with a 4\,MB memtable and
+\texttt{max\_write\_buffer\_number} $= 3$, the writer eventually outruns the
+single flush thread and is throttled.  GravTree's writer is throttled too
+(the hard limit at twice the buffer threshold blocks \texttt{insert()} until LocalFlush completes),
+but that back-pressure is exercised rarely at this scale and its cost lands
+on a small number of operations.
+
+\textbf{Throughput.}  The right-hand column is the cost of the design.
+RocksDB sustains 21$\times$ (SeqWrite) to 80$\times$ (RandWrite) more writes
+per second.  Two factors dominate.  First, every LocalFlush rewrites whole
+nodes: a 4\,MB root flush that touches $c$ children rewrites up to
+$c \cdot B$ bytes, and when a child's own buffer fills it recursively rewrites
+its children.  For uniformly random keys every root flush touches all
+children, so write amplification grows with the number of tree levels and
+the fanout.  We measured it directly (bytes passed to \texttt{write(2)} by
+the process, from \texttt{/proc/self/io}, divided by the $N \cdot 120$\,B
+logical payload; background compactions drained before reading the
+counter).  At 1M operations GravTree writes $6.5\times$ (SeqWrite) and
+$8.6\times$ (RandWrite) the logical volume versus $1.0\times$ and
+$3.3\times$ for RocksDB.  At 10M operations SeqWrite stays at $9.4\times$
+(RocksDB $1.0\times$), but RandWrite reaches $\mathbf{180\times}$
+(216\,GB written for 1.2\,GB of payload) versus $10.0\times$ for RocksDB:
+with uniformly random keys every root flush is spread across all children,
+so each flush rewrites essentially the whole tree below it, and the rewrite
+volume grows with the dataset size.  This, not per-operation
+overhead, is why the 10M RandWrite run took 51 minutes.  Second, the flush thread is single-threaded and performs merge,
+Bloom-filter construction, CRC-64 and file write serially while holding the
+tree lock.  The single-threaded flush is a prototype limitation; the random-write
+amplification is a property of whole-node rewriting under the current
+buffer/fanout configuration and is the limitation a production deployment
+would hit first (\S\ref{sec:limits}).  Reducing it requires either
+larger child buffers relative to the root (so a flush touches fewer
+children) or partial-node rewrites, both left to future work.
+
+\subsection{Read Latency}
+
+\begin{table}[t]
+\centering
+\small
+\caption{Point read latency ($\mu$s) and throughput, 1M-key dataset,
+10M random lookups.  \textbf{Bold} = better.}
+\label{tab:read}
+\begin{tabular}{lrrrrr}
+\toprule
+ & p50 & p99 & p99.9 & p99.99 & Mops/s \\
+\midrule
+GravTree & \textbf{1.47} & \textbf{2.42} & \textbf{9.29} & \textbf{14.4} & \textbf{0.620} \\
+RocksDB  & 3.97 & 6.21 & 13.39 & 50.7 & 0.258 \\
+Ratio    & 2.7$\times$ & 2.6$\times$ & 1.4$\times$ & 3.5$\times$ & 2.4$\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Point reads are GravTree's strongest result (Table~\ref{tab:read}):
+2.6$\times$ lower p99, 3.5$\times$ lower p99.99, and 2.4$\times$ higher
+throughput on a dataset 30$\times$ larger than the write buffer, so the
+result is not a DRAM-hit artefact.  A GravTree lookup walks a tree of height
+2--3, consulting one Bloom filter per node on the path and reading at most
+one leaf; there is no level-by-level probing of overlapping SSTables and no
+block cache indirection.
+
+\subsection{Latency Time-Series}
+\label{sec:timeseries}
+
+\begin{table}[t]
+\centering
+\footnotesize
+\caption{Peak write latency per 20\,000-operation window (500 windows per
+workload), all in $\mu$s: range of per-window peaks over the run, count of
+windows whose peak exceeds 100\,$\mu$s, and the single worst window.  Both engines'
+final-window spike is the explicit \texttt{flush()} issued after the last
+operation and is excluded.  $^\ddagger$ops 9.96M--9.98M.}
+\label{tab:timeseries}
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{llrrr}
+\toprule
+Workload & Engine & Range & $>$100 & Worst \\
+\midrule
+SeqWrite  & GravTree & 0.2--1.4  & 0 & 1.4 \\
+          & RocksDB  & 0.6--2.7  & 0 & 2.7 \\
+RandWrite & GravTree & 0.3--4.2  & 0 & 4.2 \\
+          & RocksDB  & 0.8--6.7  & 1 & 1\,060$^\ddagger$ \\
+Mixed     & GravTree & 0.2--8.7  & 0 & 8.7 \\
+          & RocksDB  & 0.6--15.3 & 0 & 15.3 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:timeseries} summarises 500 per-window peaks per workload.
+GravTree exhibits no mid-run window above 100\,$\mu$s on any workload: its
+peak stays within 0.2--1.4\,$\mu$s for SeqWrite and rises smoothly from
+0.3 to 4.2\,$\mu$s over the RandWrite run as leaves fill and the tree
+deepens.
+RocksDB is likewise flat for SeqWrite and Mixed at this scale; the
+\emph{multi-level compaction cascades} that produce tens-of-millisecond
+stalls in production did not manifest on this hardware at $N = 10$M with
+1.2\,GB of data, and we do not claim to have observed them.  The one RocksDB
+excursion is a write stall of $\approx$1\,ms in the final pre-flush RandWrite
+window (ops 9.96M--9.98M),
+which accounts for its p99.9/p99.99 in Table~\ref{tab:write}.
+
+The final-window spike (excluded above) is the benchmark's closing
+\texttt{flush()}.  For GravTree it drains the root buffer through every
+level of the tree in one synchronous call---1.2\,s (SeqWrite) to 29.7\,s
+(RandWrite)---and is the clearest single measurement of the write
+amplification discussed above.  For RocksDB it is a memtable flush of
+4--11\,ms.  Neither is an operational stall, but the GravTree figure shows
+that a bounded \emph{per-event} cost does not imply a small \emph{total}
+cost when many events are chained.
+
+\subsection{Discussion and Limitations}
+\label{sec:limits}
+
+\textbf{Write throughput and amplification.}  The dominant limitation of the
+current prototype is write throughput: 0.067\,Mops/s sequential and
+0.003\,Mops/s random, versus 1.44 and 0.23 for RocksDB, driven by a
+measured write amplification of 180$\times$ at 10M random keys (9.4$\times$
+sequential) against 10$\times$ and 1.0$\times$ for RocksDB.  The LocalFlush
+bound guarantees that no single compaction event exceeds $O(K \cdot B)$ I/O,
+but it does not reduce total I/O: each key is rewritten once per tree level
+plus once per LocalFlush that touches its leaf, and the flush thread executes
+these rewrites serially under the tree lock, so a writer that outruns it is
+blocked at the hard limit.  Three engineering changes, none of which alter
+the LocalFlush invariant, would close most of this gap and are the immediate
+next step: (i) parallel LocalFlush across disjoint children, which are
+independent by construction; (ii) delta files for internal nodes, so a flush
+into a child appends a run rather than rewriting the node; and (iii) larger
+leaves with a smaller root buffer, trading a modest increase in per-event
+bound for far fewer rewrites.  Until these are implemented, GravTree is
+suited to read-heavy or latency-sensitive workloads with moderate write
+rates, not to bulk ingest.
+
+\textbf{What the evaluation does and does not show.}  It shows that
+GravTree's write tail is tightly bounded (p99.99 $< 20\,\mu$s on every
+workload) and that its p99 is lower than RocksDB's on every workload.  It
+does \emph{not} show RocksDB compaction cascades: at 10M operations and
+1.2\,GB on a server-class NVMe device, RocksDB's mid-run peaks stayed under
+100\,$\mu$s.  Larger datasets, larger values, or slower devices would be
+needed to test the ``stall elimination'' hypothesis directly, and we leave
+that as an explicit open question rather than a claim.
+
+\textbf{No WAL; durability parity.}  The prototype does not persist the
+write buffer to a WAL, and RocksDB was run with \texttt{disableWAL} to match.
+Absolute RocksDB write latencies with its default WAL-enabled configuration
+are higher (its p50 was $\approx 3\,\mu$s in our original WAL-enabled 100K measurements),
+so the comparison here is conservative toward RocksDB.  Adding a WAL to
+GravTree is orthogonal to LocalFlush but would add the same per-write cost.
+
+\textbf{Single-threaded writers.}  Concurrent external writers are serialised
+by \texttt{write\_buf\_mu}; the numbers above are single-client.  Per-shard
+skip lists are straightforward future work.
+
+\textbf{Benchmark platform.}  Measurements were taken on a cloud VM with a
+virtualised NVMe disk; absolute values will differ on bare metal, and the
+relative results should be re-validated there.
+
+% ── 6. ZNS Compatibility ──────────────────────────────────────────────────────
+\section{ZNS SSD Compatibility}
+\label{sec:zns}
+
+Zoned Namespace (ZNS) SSDs~\cite{zns} eliminate the device-level FTL by
+requiring applications to write each zone sequentially and reset zones before
+reuse.  This shifts GC responsibility to the host software.  Storage engines
+designed for random-overwrite block devices require substantial rearchitecting
+for ZNS compatibility.  ZenFS~\cite{zenfs} adds ZNS support to RocksDB by
+mapping SST files to zones, but compaction still rewrites multi-gigabyte zones
+non-sequentially within the RocksDB level hierarchy.
+
+GravTree's immutable node model aligns with ZNS requirements by construction:
+
+\begin{itemize}
+  \item \textbf{Sequential write.}  Each SSTable file is written front-to-back
+        in a single pass (magic, header, Bloom filter, entries, sparse index,
+        CRC) and never modified.  This matches the ZNS per-zone sequential
+        write requirement exactly.
+  \item \textbf{Natural GC.}  When LocalFlush creates new child files, the old
+        child files are atomically invalidated.  The corresponding zones can be
+        immediately reset and recycled, providing deterministic, bounded GC
+        with no separate GC thread.
+  \item \textbf{Bounded zone pressure.}  A single LocalFlush activates at most
+        $K + 1$ zones simultaneously (one per new child file, plus the parent).
+        This simplifies zone allocation compared to LSM compaction, which may
+        open $O(|L_i| + |L_{i+1}|)$ files concurrently.
+\end{itemize}
+
+A ZNS backend using the libzbd API~\cite{libzbd} is in development.  We plan
+to report quantitative results on ZNS hardware in a follow-up evaluation.
+
+% ── 7. Related Work ───────────────────────────────────────────────────────────
+\section{Related Work}
+\label{sec:related}
+
+\textbf{LSM-tree optimisations.}  A large body of work optimises LSM-tree
+compaction policy without bounding its scope.  Dostoevsky~\cite{dostoevsky}
+and Monkey~\cite{monkey} tune Bloom filter allocations across levels for
+different read/write trade-offs.  WiscKey~\cite{wisckey} separates keys from
+values to reduce compaction I/O.  PebblesDB~\cite{pebblesdb} introduces guards
+to partition levels and reduce write amplification.  None of these approaches
+bound per-compaction I/O to a constant independent of dataset size.
+
+\textbf{\texorpdfstring{B$^\epsilon$-trees.}{B-epsilon trees.}}  Bender et al.~\cite{bender2007cache} introduced
+the \texorpdfstring{B$^\epsilon$-tree}{B-epsilon-tree}; TokuDB (now Percona TokuMX) commercialised it.
+SplinterDB~\cite{splinterdb} achieves high throughput with small per-flush
+scopes.  GravTree uses the same parent-local flush insight but commits to
+immutable SSTable files as nodes, enabling consistent per-node Bloom filters
+and direct ZNS zone mapping without adaptation.
+
+\textbf{NVMe-optimised LSM-trees.}  SpanDB~\cite{spandb} places the WAL and
+top LSM levels on fast NVMe, reducing write latency.  These are orthogonal
+to GravTree's compaction-locality property and could be combined.
+
+\textbf{ZNS-aware storage.}  ZenFS~\cite{zenfs} adapts RocksDB for ZNS.
+F2FS and dm-zoned provide ZNS-friendly file systems.  None structurally
+guarantee that a single compaction touches a bounded number of zones;
+GravTree does.
+
+% ── 8. Conclusion ─────────────────────────────────────────────────────────────
+\section{Conclusion and Future Work}
+\label{sec:conclusion}
+
+We presented GravTree, a tree-structured key-value store whose central
+invariant---LocalFlush touches exactly one parent and its direct
+children---bounds per-compaction I/O to a constant independent of dataset
+size.  A C++17 prototype evaluated at 10M operations against RocksDB under
+equal (no-WAL) durability achieves 1.3--2.6$\times$ lower p99 latency on all
+four workloads, keeps p99.99 write latency below 20\,$\mu$s, and delivers
+2.4$\times$ higher point-read throughput.  The cost is write throughput:
+whole-node rewrites give a measured write amplification of 9.4$\times$
+(sequential) and 180$\times$ (random) at 10M keys versus 1.0$\times$ and
+10$\times$ for RocksDB, and, with a single-threaded flush, a 21--80$\times$
+lower sustained write rate.  We did not observe LSM
+compaction cascades in RocksDB at this scale, so bounded-cascade behaviour
+remains an architectural argument rather than an empirical one.
+
+Planned future work:
+
+\begin{enumerate}[leftmargin=1.5em]
+  \item \textbf{Write-amplification reduction.} Partial-node rewrites or
+        level-dependent buffer sizes so a random-key flush does not rewrite
+        the whole subtree; parallel flush of sibling children with merge,
+        Bloom-filter construction and CRC-64 moved off the tree lock.
+  \item \textbf{Write-ahead log.} Adding crash durability for the in-memory
+        write buffer.
+  \item \textbf{ZNS backend.} Quantitative evaluation on ZNS hardware with
+        the libzbd backend.
+  \item \textbf{Bare-metal and slow-device revalidation.} Repeating the
+        evaluation on dedicated hardware and on devices where LSM compaction
+        is I/O-bound, where cascade stalls are expected to appear.
+  \item \textbf{Formal analysis.} Proof of the write-amplification bound
+        and comparison with the B$^\epsilon$-tree optimality result of
+        Bender et al.
+\end{enumerate}
+
+The GravTree prototype is available as open-source software under the AGPL
+license.
+
+% ── References ────────────────────────────────────────────────────────────────
+\balance
+\bibliographystyle{plain}
+\bibliography{refs}
+
+\end{document}
