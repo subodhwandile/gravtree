@@ -1,33 +1,18 @@
 \begin{thebibliography}{10}
 
 \bibitem{bender2007cache}
-Michael~A Bender, Martin Farach-Colton, Jeremy~T Fineman, Yonatan~R Fogel,
-  Bradley~C Kuszmaul, and Jelani Nelson.
+Michael~A Bender, Martin Farach-Colton, William Jannen, Rob Johnson, Bradley~C
+  Kuszmaul, Donald~E Porter, Jun Yuan, and Yang Zhan.
 \newblock An introduction to {B}$^\epsilon$-trees and write-optimization.
-\newblock In {\em ;login: The USENIX Magazine}, volume~35, 2010.
+\newblock {\em ;login: The USENIX Magazine}, 40(5), 2015.
 
 \bibitem{zenfs}
 Matias Bjorling.
 \newblock {ZenFS}: A storage backend for {RocksDB} on {ZNS} {SSDs}.
 \newblock \url{https://github.com/westerndigitalcorporation/zenfs}, 2021.
 
-\bibitem{zns}
-Matias Bjorling, Abutalib Aghayev, Hans Holmberg, Aravind Ramesh, Geert
-  Du~Plessis, Rafael~Batista Dowsley, and Zvika Guz.
-\newblock Don't be a blockhead: Zoned namespaces make work on conventional
-  {SSDs} obsolete.
-\newblock In {\em USENIX HotStorage}, 2021.
-
-\bibitem{lsm-survey}
-Zhichao Cao, Siying Dong, Sagar Vemuri, and David~HC Du.
-\newblock Characterizing, modeling, and benchmarking {RocksDB} key-value
-  workloads at {Facebook}.
-\newblock In {\em 18th USENIX Conference on File and Storage Technologies
-  (FAST)}, 2020.
-
 \bibitem{spandb}
-Hao Chen, Chaoyi Luo, Yuhao Wang, Shiwen Zhang, Yinan Su, Wenqing Wu, Qing Li,
-  and Yuhao Chen.
+Hao Chen, Chaoyi Ruan, Cheng Li, Xiaosong Ma, and Yinlong Xu.
 \newblock {SpanDB}: A fast, cost-effective {LSM}-tree based {KV} store on
   hybrid storage.
 \newblock In {\em 19th USENIX Conference on File and Storage Technologies
@@ -35,7 +20,7 @@ Hao Chen, Chaoyi Luo, Yuhao Wang, Shiwen Zhang, Yinan Su, Wenqing Wu, Qing Li,
 
 \bibitem{splinterdb}
 Alex Conway, Abhishek Gupta, Vijay Chidambaram, Martin Farach-Colton, Richard
-  Spillane, Michael~A Bender, and Rob Johnson.
+  Spillane, Amy Tai, and Rob Johnson.
 \newblock {SplinterDB}: Closing the bandwidth gap for {NVMe} key-value stores.
 \newblock In {\em USENIX Annual Technical Conference (ATC)}, 2020.
 
@@ -75,6 +60,11 @@ Lanyue Lu, Thanumalayan~Sankaranarayana Pillai, Hariharan Gopalakrishnan,
 \newblock In {\em USENIX Conference on File and Storage Technologies (FAST)},
   2016.
 
+\bibitem{lsm-survey}
+Chen Luo and Michael~J. Carey.
+\newblock {LSM}-based storage techniques: a survey.
+\newblock {\em The VLDB Journal}, 29(1):393--418, 2020.
+
 \bibitem{oneil1996lsm}
 Patrick O'Neil, Edward Cheng, Dieter Gawlick, and Elizabeth O'Neil.
 \newblock The log-structured merge-tree ({LSM}-tree).
@@ -85,6 +75,12 @@ Pandian Raju, Rohan Kadekodi, Vijay Chidambaram, and Ittai Abraham.
 \newblock {PebblesDB}: Building key-value stores using fragmented
   log-structured merge trees.
 \newblock In {\em ACM Symposium on Operating Systems Principles (SOSP)}, 2017.
+
+\bibitem{zns}
+Theano Stavrinos, Daniel~S. Berger, Ethan Katz-Bassett, and Wyatt Lloyd.
+\newblock Don't be a blockhead: Zoned namespaces make work on conventional
+  {SSDs} obsolete.
+\newblock In {\em Workshop on Hot Topics in Operating Systems (HotOS)}, 2021.
 
 \bibitem{libzbd}
 {Western Digital}.
