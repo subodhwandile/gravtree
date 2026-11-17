@@ -438,6 +438,11 @@ void GravTree::do_flush(NodeId parent_id) {
     for (NodeId cid : to_check) {
         auto it = cache_.find(cid);
         if (it == cache_.end()) continue;   // already erased by a prior split
+        try {
+            get_node(cid);   // cid may be invalidated but still cached
+        } catch (const std::runtime_error&) {
+            continue;
+        }
         SSTNode& child = it->second;
         if (!child.buffer_full()) continue;
         if (child.is_leaf() && child.num_children == 0) {
@@ -531,6 +536,11 @@ void GravTree::insert_child(NodeId parent_id, const std::string& /*fence_key*/,
                 goto done;
             }
         }
+        fprintf(stderr,
+                "insert_child: old child %llu not listed under parent %llu "
+                "(%u children) — leaf split not recorded\n",
+                (unsigned long long)old_child_id,
+                (unsigned long long)parent_id, parent.num_children);
     }
     if (parent.num_children < MAX_FANOUT) goto done;
 
@@ -544,7 +554,14 @@ void GravTree::insert_child(NodeId parent_id, const std::string& /*fence_key*/,
         std::vector<Entry> pbuf = parent.buffer;   // usually empty
 
         auto it = std::find(kids.begin(), kids.end(), old_child_id);
-        if (it == kids.end()) goto done;   // stale pointer — nothing to replace
+        if (it == kids.end()) {
+            fprintf(stderr,
+                    "insert_child: old child %llu not listed under full parent "
+                    "%llu — leaf already invalidated; parent keeps stale ref\n",
+                    (unsigned long long)old_child_id,
+                    (unsigned long long)parent_id);
+            goto done;   // stale pointer — nothing to replace
+        }
         size_t pos = static_cast<size_t>(it - kids.begin());
         kids[pos] = left_id;
         kids.insert(kids.begin() + pos + 1, right_id);   // MAX_FANOUT + 1 children
