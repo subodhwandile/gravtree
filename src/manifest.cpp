@@ -73,8 +73,21 @@ void Manifest::save() const {
 
 void Manifest::register_node(NodeId id, uint32_t level,
                               const std::string& file_path) {
+    std::error_code ec;
+    uint64_t sz = fs::file_size(file_path, ec);
     std::lock_guard<std::mutex> lk(mu_);
     nodes_[id] = NodeMeta{id, level, file_path, true};
+    if (!ec) {
+        size_t slot = std::min<size_t>(level, bytes_written_.size() - 1);
+        bytes_written_[slot].fetch_add(sz, std::memory_order_relaxed);
+    }
+}
+
+std::vector<uint64_t> Manifest::bytes_written_by_level() const {
+    std::vector<uint64_t> out(bytes_written_.size());
+    for (size_t i = 0; i < bytes_written_.size(); ++i)
+        out[i] = bytes_written_[i].load(std::memory_order_relaxed);
+    return out;
 }
 
 void Manifest::invalidate_node(NodeId id) {

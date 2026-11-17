@@ -108,8 +108,14 @@ FlushResult local_flush(SSTNode&              parent,
         std::vector<NodeId> grandchildren(
             child.child_ids, child.child_ids + child.num_children);
 
+        // Internal nodes: the persisted key_range must cover the children,
+        // so widen it with the old child's range (union with the merged
+        // buffer) — avoids a second write later to patch the range.
+        const KeyRange* span = child.num_children > 0 ? &child.key_range : nullptr;
+
         SSTNode new_child = SSTNode::create(
-            new_id, child.level, std::move(merged), grandchildren, data_dir);
+            new_id, child.level, std::move(merged), grandchildren, data_dir,
+            span);
 
         manifest.register_node(new_id, child.level, new_child.file_path);
         manifest.invalidate_node(child.id);

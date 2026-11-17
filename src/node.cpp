@@ -98,7 +98,8 @@ SSTNode SSTNode::create(NodeId                     id,
                         uint32_t                   level,
                         std::vector<Entry>         entries,
                         const std::vector<NodeId>& children,
-                        const std::string&         dir) {
+                        const std::string&         dir,
+                        const KeyRange*            span) {
     SSTNode node(id, level);
     node.buffer = std::move(entries);
     node.sort_buffer();
@@ -111,6 +112,14 @@ SSTNode SSTNode::create(NodeId                     id,
     if (!node.buffer.empty()) {
         node.key_range.min_key = node.buffer.front().key;
         node.key_range.max_key = node.buffer.back().key;
+    }
+    if (span) {
+        if (!span->min_key.empty() &&
+            (node.key_range.min_key.empty() || span->min_key < node.key_range.min_key))
+            node.key_range.min_key = span->min_key;
+        if (!span->max_key.empty() &&
+            (node.key_range.max_key.empty() || span->max_key > node.key_range.max_key))
+            node.key_range.max_key = span->max_key;
     }
 
     node.build_bloom();

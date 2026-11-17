@@ -34,10 +34,24 @@ GravTree::~GravTree() {
         std::unique_lock<std::shared_mutex> lk(cache_mu_);
         NodeId rid = manifest_->root_id();
         if (rid != INVALID_NODE_ID) {
+            {
+                SSTNode& root = get_node(rid);
+                for (auto& e : pending)
+                    root.buffer.push_back(std::move(e));
+                std::stable_sort(root.buffer.begin(), root.buffer.end());
+                if (root.buffer_full()) {
+                    if (root.is_leaf() && root.num_children == 0) {
+                        auto path = find_path(root.buffer.empty()
+                                              ? std::string{}
+                                              : root.buffer.front().key);
+                        split_leaf(rid, path);
+                    } else if (root.num_children > 0) {
+                        do_flush(rid);
+                    }
+                }
+            }
+            rid = manifest_->root_id();
             SSTNode& root = get_node(rid);
-            for (auto& e : pending)
-                root.buffer.push_back(std::move(e));
-            std::stable_sort(root.buffer.begin(), root.buffer.end());
             if (!root.buffer.empty()) {
                 root.flush_to_disk(opts_.data_dir);
                 manifest_->register_node(rid, root.level, root.file_path);
@@ -106,8 +120,12 @@ void GravTree::flush_thread_fn() {
             // Update the approximate buffer size counter after flush.
             root_buf_bytes_.store(write_buf_.size_bytes(),
                                   std::memory_order_release);
+        } catch (const std::exception& e) {
+            // Never let an exception kill the flush thread, but log it —
+            // a swallowed flush failure would otherwise be invisible.
+            fprintf(stderr, "gravtree flush error: %s\n", e.what());
         } catch (...) {
-            // Never let an exception kill the flush thread.
+            fprintf(stderr, "gravtree flush error: unknown exception\n");
         }
 
         flush_requested_.store(false, std::memory_order_release);
@@ -156,7 +174,15 @@ SSTNode& GravTree::get_node(NodeId id) {
     auto it = cache_.find(id);
     if (it != cache_.end()) return it->second;
 
-    std::string path = manifest_->node_path(id);
+    std::string path;
+    try {
+        path = manifest_->node_path(id);
+    } catch (...) {
+        fprintf(stderr, "get_node: stale id %llu (root=%llu)\n",
+                (unsigned long long)id,
+                (unsigned long long)manifest_->root_id());
+        throw;
+    }
     SSTNode node = SSTNode::load_header(path);
     node.load_entries();
     cache_[id] = std::move(node);
@@ -298,12 +324,29 @@ void GravTree::flush() {
 
     std::unique_lock<std::shared_mutex> lk(cache_mu_);
     NodeId rid = manifest_->root_id();
+    {
+        SSTNode& root = get_node(rid);
+        for (auto& e : pending)
+            root.buffer.push_back(std::move(e));
+        std::stable_sort(root.buffer.begin(), root.buffer.end());
+
+        // Same threshold logic as the background pass: a full root must
+        // cascade (split or flush) before persisting whatever remains.
+        if (root.buffer_full()) {
+            if (root.is_leaf() && root.num_children == 0) {
+                auto path = find_path(root.buffer.empty()
+                                      ? std::string{}
+                                      : root.buffer.front().key);
+                split_leaf(rid, path);
+            } else if (root.num_children > 0) {
+                do_flush(rid);
+            }
+        }
+    }
+
+    // split_leaf/do_flush may invalidate the old root — refetch.
+    rid = manifest_->root_id();
     SSTNode& root = get_node(rid);
-
-    for (auto& e : pending)
-        root.buffer.push_back(std::move(e));
-    std::stable_sort(root.buffer.begin(), root.buffer.end());
-
     if (!root.buffer.empty()) {
         root.flush_to_disk(opts_.data_dir);
         manifest_->register_node(rid, root.level, root.file_path);
@@ -360,12 +403,20 @@ void GravTree::do_flush(NodeId parent_id) {
         if (c.num_children > 0) {
             const std::string cmin = get_node(c.child_ids[0]).key_range.min_key;
             const std::string cmax = get_node(c.child_ids[c.num_children - 1]).key_range.max_key;
-            if (c.key_range.min_key.empty() || cmin < c.key_range.min_key)
-                c.key_range.min_key = cmin;
-            if (c.key_range.max_key.empty() || cmax > c.key_range.max_key)
-                c.key_range.max_key = cmax;
-            c.flush_to_disk(opts_.data_dir);
-            manifest_->register_node(c.id, c.level, c.file_path);
+            bool widened = false;
+            if (c.key_range.min_key.empty() || cmin < c.key_range.min_key) {
+                c.key_range.min_key = cmin; widened = true;
+            }
+            if (c.key_range.max_key.empty() || cmax > c.key_range.max_key) {
+                c.key_range.max_key = cmax; widened = true;
+            }
+            // create() already persists the widened range; rewrite only if
+            // the children's span escaped it (should not happen).
+            if (widened) {
+                widen_rewrites_.fetch_add(1, std::memory_order_relaxed);
+                c.flush_to_disk(opts_.data_dir);
+                manifest_->register_node(c.id, c.level, c.file_path);
+            }
         }
         cache_[c.id] = std::move(c);
     }
@@ -570,7 +621,9 @@ GravTree::Stats GravTree::stats() const {
     return Stats{
         cache_.size(), 1,
         flush_ops_.load(), split_ops_.load(),
-        root_buf_bytes_.load()
+        root_buf_bytes_.load(),
+        manifest_->bytes_written_by_level(),
+        widen_rewrites_.load()
     };
 }
 

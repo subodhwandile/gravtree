@@ -2,6 +2,7 @@
 
 #include "gravtree/types.h"
 
+#include <array>
 #include <atomic>
 #include <mutex>
 #include <string>
@@ -67,12 +68,18 @@ public:
     // Delete files for all invalid nodes.
     void gc();
 
+    // Total bytes of node files registered at each level, indexed by level.
+    // Counts every file passed to register_node(), i.e. every node file
+    // written by this process since open (load() does not count).
+    std::vector<uint64_t> bytes_written_by_level() const;
+
 private:
     std::string dir_;
     NodeId      root_id_{INVALID_NODE_ID};
     std::atomic<NodeId> next_id_{1};
     std::unordered_map<NodeId, NodeMeta> nodes_;
     mutable std::mutex mu_;
+    std::array<std::atomic<uint64_t>, MAX_TREE_HEIGHT> bytes_written_{};
 
     std::string manifest_path() const;
     std::string tmp_path()      const;

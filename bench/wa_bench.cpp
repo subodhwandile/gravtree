@@ -56,13 +56,26 @@ int main(int argc, char** argv) {
         for (size_t i = 0; i < N; ++i) tree->insert(key_at(i), val);
         tree->flush();
         auto st = tree->stats();
-        std::cout << "flush_ops=" << st.total_flush_ops << " split_ops=" << st.total_split_ops << "\n";
+        std::cout << "flush_ops=" << st.total_flush_ops << " split_ops=" << st.total_split_ops
+                  << " widen_rewrites=" << st.widen_rewrites << "\n";
+        const double logical_gt = double(N) * (20 + 100);
+        uint64_t sum_lv = 0;
+        for (size_t L = 0; L < st.bytes_written_by_level.size(); ++L) {
+            uint64_t b = st.bytes_written_by_level[L];
+            if (!b) continue;
+            sum_lv += b;
+            std::cout << "level_bytes[" << L << "]=" << b
+                      << " level_WA=" << b / logical_gt << "\n";
+        }
+        std::cout << "node_bytes_total=" << sum_lv << "\n";
         tree.reset();
     } else {
         rocksdb::Options o; o.create_if_missing = true; o.compression = rocksdb::kNoCompression;
         o.write_buffer_size = 4ULL << 20; o.max_write_buffer_number = 3;
         o.max_background_compactions = 1; o.max_background_flushes = 1;
-        std::unique_ptr<rocksdb::DB> db; rocksdb::Status s = rocksdb::DB::Open(o, dir, &db);
+        rocksdb::DB* db_ptr = nullptr;
+        rocksdb::Status s = rocksdb::DB::Open(o, dir, &db_ptr);
+        std::unique_ptr<rocksdb::DB> db(db_ptr);
         if (!s.ok()) { std::cerr << s.ToString() << "\n"; return 1; }
         rocksdb::WriteOptions wo; wo.disableWAL = true;
         for (size_t i = 0; i < N; ++i) db->Put(wo, key_at(i), val);

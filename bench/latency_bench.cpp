@@ -70,10 +70,10 @@ static std::unique_ptr<rocksdb::DB> open_rocksdb(const std::string& dir) {
     opts.max_background_compactions = 1;
     opts.max_background_flushes     = 1;
 
-    std::unique_ptr<rocksdb::DB> db;
-    rocksdb::Status s = rocksdb::DB::Open(opts, dir, &db);
+    rocksdb::DB* db_ptr = nullptr;
+    rocksdb::Status s = rocksdb::DB::Open(opts, dir, &db_ptr);
     assert(s.ok() && "RocksDB open failed");
-    return db;
+    return std::unique_ptr<rocksdb::DB>(db_ptr);
 }
 
 // ── statistics ────────────────────────────────────────────────────────────────

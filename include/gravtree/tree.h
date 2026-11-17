@@ -85,6 +85,8 @@ public:
         size_t total_flush_ops;
         size_t total_split_ops;
         size_t root_buf_bytes;       // current root buffer size
+        std::vector<uint64_t> bytes_written_by_level; // node-file bytes per level
+        size_t widen_rewrites;     // internal children rewritten just for key_range
     };
     Stats stats() const;
 
@@ -117,6 +119,7 @@ private:
     std::atomic<size_t>         flush_ops_{0};
     std::atomic<size_t>         split_ops_{0};
     std::atomic<size_t>         root_buf_bytes_{0};
+    std::atomic<size_t>         widen_rewrites_{0};
 
     // ── Helpers ──────────────────────────────────────────────────────────────
     SequenceNumber next_seq() noexcept {

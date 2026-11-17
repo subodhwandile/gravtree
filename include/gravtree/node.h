@@ -82,11 +82,15 @@ public:
     SSTNode& operator=(SSTNode&&) = default;
 
     // Factory: create a brand-new node, write it to dir, return populated object.
-    static SSTNode create(NodeId                    id,
-                          uint32_t                  level,
-                          std::vector<Entry>        entries,
+    // When span is non-null, the persisted key_range is the union of the
+    // entries' range and *span (used for internal nodes whose range must
+    // cover their children, which may be wider than the merged buffer).
+    static SSTNode create(NodeId                     id,
+                          uint32_t                   level,
+                          std::vector<Entry>         entries,
                           const std::vector<NodeId>& children,
-                          const std::string&        dir);
+                          const std::string&         dir,
+                          const KeyRange*            span = nullptr);
 
     // Load header + bloom filter from an existing file (entries loaded lazily).
     static SSTNode load_header(const std::string& path);
