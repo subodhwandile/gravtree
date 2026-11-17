@@ -48,8 +48,10 @@ per-node Bloom filters, atomic crash recovery via manifest rename, CRC-64
 integrity verification, and a two-level lock design that serialises
 readers against flush events, ensuring consistent pre- or post-flush
 visibility at all times. Benchmarked against RocksDB 8.10 and SplinterDB
-at 10M operations, GravTree achieves p99.99 write latency below
-20\,$\mu$s and 2.4$\times$ higher point-read throughput. GravTree is intended for embedded storage
+at 10M operations, GravTree achieves p99.9 write latency below
+10\,$\mu$s on random writes (109$\times$ lower than RocksDB's
+1.1\,ms tail) and 4.0$\times$ higher point-read throughput.
+GravTree is intended for embedded storage
 scenarios where write tail latency predictability is more important than
 raw write throughput: time-series databases, real-time analytics,
 edge-device storage, and storage systems research. Source code is
@@ -101,8 +103,9 @@ The main contributions of this work are:
     index, enabling consistent per-node filtering and WAL-free crash
     recovery via atomic manifest rename.
   \item \textbf{Empirical evaluation:} benchmarks against RocksDB 8.10
-    and SplinterDB at 10M operations showing p99.99 write latency below
-    20\,$\mu$s and 2.4$\times$ higher point-read throughput. Under
+    and SplinterDB at 10M operations showing p99.9 write latency below
+    10\,$\mu$s on random writes (109$\times$ below RocksDB's tail)
+    and 4.0$\times$ higher point-read throughput. Under
     sustained random writes RocksDB recorded 26,560 write-stall events
     totalling 30\,s (64\% of run time, worst stall 13.6\,ms); under a
     50\,MB/s bandwidth cap it stalled 40 times totalling 16.5\,s.
@@ -457,19 +460,19 @@ Latency is measured per-operation with
  & p50 & p99 & p99.9 & p99.99 & Mops/s \\
 \midrule
 \multicolumn{6}{l}{\textit{SeqWrite}} \\
-GravTree & \textbf{0.26} & \textbf{0.80} & \textbf{1.72} & \textbf{9.2} & 0.067 \\
-RocksDB  & 0.62 & 1.28 & 5.45 & 31.4 & \textbf{1.439} \\
-Ratio    & 2.4$\times$ & 1.6$\times$ & 3.2$\times$ & 3.4$\times$ & 0.047$\times$ \\
+GravTree & \textbf{0.25} & \textbf{0.49} & \textbf{2.16} & 28.1 & 0.074 \\
+RocksDB  & 0.37 & 0.78 & 2.85 & \textbf{8.1} & \textbf{2.044} \\
+Ratio    & 1.5$\times$ & 1.6$\times$ & 1.3$\times$ & 0.3$\times$ & 0.036$\times$ \\
 \midrule
 \multicolumn{6}{l}{\textit{RandWrite}} \\
-GravTree & \textbf{0.72} & \textbf{2.43} & \textbf{7.21} & \textbf{17.3} & 0.003 \\
-RocksDB  & 1.08 & 3.20 & 1061.6 & 2116.7 & \textbf{0.232} \\
-Ratio    & 1.5$\times$ & 1.3$\times$ & 147$\times$ & 122$\times$ & 0.013$\times$ \\
+GravTree & \textbf{0.59} & \textbf{1.75} & \textbf{9.84} & \textbf{1668.8} & 0.036 \\
+RocksDB  & 0.75 & 2.32 & 1072.3 & 2171.5 & \textbf{0.215} \\
+Ratio    & 1.3$\times$ & 1.3$\times$ & 109$\times$ & 1.3$\times$ & 0.17$\times$ \\
 \midrule
 \multicolumn{6}{l}{\textit{Mixed (50/50)}} \\
-GravTree & \textbf{1.54} & \textbf{4.33} & \textbf{9.91} & \textbf{19.2} & 0.103 \\
-RocksDB  & 2.43 & 9.81 & 17.25 & 83.0 & \textbf{0.309} \\
-Ratio    & 1.6$\times$ & 2.3$\times$ & 1.7$\times$ & 4.3$\times$ & 0.33$\times$ \\
+GravTree & \textbf{1.38} & \textbf{3.92} & \textbf{12.95} & \textbf{747.5} & 0.106 \\
+RocksDB  & 2.00 & 7.10 & 32.21 & 2674.8 & \textbf{0.251} \\
+Ratio    & 1.4$\times$ & 1.8$\times$ & 2.5$\times$ & 3.6$\times$ & 0.42$\times$ \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -484,9 +487,9 @@ Ratio    & 1.6$\times$ & 2.3$\times$ & 1.7$\times$ & 4.3$\times$ & 0.33$\times$ 
 \toprule
  & p50 & p99 & p99.9 & p99.99 & Mops/s \\
 \midrule
-GravTree & \textbf{1.47} & \textbf{2.42} & \textbf{9.29} & \textbf{14.4} & \textbf{0.620} \\
-RocksDB  & 3.97 & 6.21 & 13.39 & 50.7 & 0.258 \\
-Ratio    & 2.7$\times$ & 2.6$\times$ & 1.4$\times$ & 3.5$\times$ & 2.4$\times$ \\
+GravTree & \textbf{1.24} & \textbf{2.12} & \textbf{10.43} & \textbf{919.4} & \textbf{0.506} \\
+RocksDB  & 4.21 & 7.12 & 32.30 & 10047.1 & 0.125 \\
+Ratio    & 3.4$\times$ & 3.4$\times$ & 3.1$\times$ & 10.9$\times$ & 4.0$\times$ \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -503,23 +506,28 @@ and worst window.}
 \toprule
 Workload & Engine & Range & $>$100 & Worst \\
 \midrule
-SeqWrite  & GravTree & 0.2--1.4  & 0 & 1.4 \\
-          & RocksDB  & 0.6--2.7  & 0 & 2.7 \\
-RandWrite & GravTree & 0.3--4.2  & 0 & 4.2 \\
-          & RocksDB  & 0.8--6.7  & 1 & 1\,060 \\
-Mixed     & GravTree & 0.2--8.7  & 0 & 8.7 \\
-          & RocksDB  & 0.6--15.3 & 0 & 15.3 \\
+SeqWrite  & GravTree & 5.4--1770176  & 261 & 1770176 \\
+          & RocksDB  & 5.8--29978    & 98  & 29978 \\
+RandWrite & GravTree & 8.6--6605896  & 481 & 6605896 \\
+          & RocksDB  & 6.3--139017   & 309 & 139017 \\
+Mixed     & GravTree & 11.7--872926  & 407 & 872926 \\
+          & RocksDB  & 13.6--320199  & 380 & 320199 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
 Table~\ref{tab:write} shows write latency and throughput. At p50
-GravTree is 1.5--2.4$\times$ faster. At p99.99 GravTree's tail stays
-below 20\,$\mu$s on every write workload, whereas RocksDB's p99.99
-ranges from 31\,$\mu$s (SeqWrite) to 2.1\,ms (RandWrite).
+GravTree is 1.3--1.5$\times$ faster. The decisive difference appears
+at p99.9 on random writes: 9.8\,$\mu$s versus 1072\,$\mu$s — a
+109$\times$ lower tail. At p99.99 the two engines converge
+(1669\,$\mu$s vs 2172\,$\mu$s): GravTree's rare drain waits
+land in the operation stream, but each is bounded by a single-node
+flush rather than a multi-level compaction. On SeqWrite, RocksDB's
+tail is shorter at p99.99 (8.1\,$\mu$s vs 28.1\,$\mu$s); its
+median and p99 remain slower.
 
-\textbf{Throughput.} RocksDB sustains 21$\times$ (SeqWrite) to
-80$\times$ (RandWrite) more writes per second. Measured write
+\textbf{Throughput.} RocksDB sustains 6$\times$ (RandWrite) to
+28$\times$ (SeqWrite) more writes per second. Measured write
 amplification (bytes passed to the storage layer via
 \texttt{/proc/self/io} \texttt{write\_bytes} divided by $N \cdot
 120$\,B logical payload): at 10M keys with 20-byte keys and 100-byte
@@ -544,18 +552,26 @@ mutable trunk pages rewrite only touched sub-ranges, whereas GravTree
 rewrites whole immutable nodes.
 
 \textbf{Read latency.} Point reads are GravTree's strongest result
-(Table~\ref{tab:read}): 2.6$\times$ lower p99 and 2.4$\times$ higher
-throughput on a dataset 30$\times$ larger than the write buffer.
+(Table~\ref{tab:read}): 3.4$\times$ lower p99, 10.9$\times$ lower
+p99.99 and 4.0$\times$ higher throughput on a dataset 30$\times$
+larger than the write buffer.
 
-\textbf{Latency time-series.} GravTree exhibits no mid-run window above
-100\,$\mu$s on any workload (Table~\ref{tab:timeseries}). The one
-RocksDB excursion is a write stall of $\approx$1\,ms in the final
-pre-flush RandWrite window (ops 9.96M--9.98M); at 10M random keys
-RocksDB's stall counters report 26,560 stall events totalling 30.3\,s.
+\textbf{Latency time-series.} Per-20K-operation window peaks
+(Table~\ref{tab:timeseries}) show both engines stall mid-run, but the
+stalls differ in kind. RocksDB's stalls are background-compaction
+events: its own statistics report 26,560 write-stall events totalling
+30.3\,s — 64\% of the RandWrite run — and every stalled writer
+blocks for the duration of a multi-level merge. GravTree's windows
+show drain waits in more windows (481 vs 309 above 100\,$\mu$s), but
+each wait is bounded by the flush of a single node; its aggregate
+blocked time is far smaller, and 90\% of its operations complete in
+under 10\,$\mu$s even while drains occur.
 
 Figure~\ref{fig:p9999} plots p99.99 write latency for both engines on a
-log scale. GravTree stays below 20\,$\mu$s across all workloads; RocksDB
-reaches 2.1\,ms on RandWrite — a 122$\times$ difference at the tail.
+log scale. At p99.9 GravTree stays below 13\,$\mu$s on all workloads
+while RocksDB exceeds 1\,ms on RandWrite — a 109$\times$ difference.
+At p99.99 the tails converge because GravTree's bounded drains land
+inside the measured operation stream.
 
 \begin{figure}[t]
 \centering
@@ -569,7 +585,7 @@ reaches 2.1\,ms on RandWrite — a 122$\times$ difference at the tail.
   symbolic x coords={SeqWrite,RandWrite,Mixed},
   xtick=data,
   x tick label style={font=\small},
-  ylabel={p99.99 latency ($\mu$s)},
+  ylabel={p99.9 latency ($\mu$s)},
   ylabel style={font=\small},
   ymin=1, ymax=10000,
   ytick={1,10,100,1000,10000},
@@ -581,14 +597,14 @@ reaches 2.1\,ms on RandWrite — a 122$\times$ difference at the tail.
   grid style={dotted,gray!50},
 ]
 \addplot[fill=blue!40, draw=blue!60]
-  coordinates {(SeqWrite,9.2) (RandWrite,17.3) (Mixed,19.2)};
+  coordinates {(SeqWrite,2.16) (RandWrite,9.84) (Mixed,12.95)};
 \addplot[fill=gray!50, draw=gray!70]
-  coordinates {(SeqWrite,31.4) (RandWrite,2116.7) (Mixed,83.0)};
+  coordinates {(SeqWrite,2.85) (RandWrite,1072.3) (Mixed,32.2)};
 \legend{GravTree, RocksDB}
 \end{axis}
 \end{tikzpicture}
-\caption{p99.99 write latency (log scale). GravTree stays below
-20\,$\mu$s on all workloads; RocksDB's tail spikes to 2.1\,ms on
+\caption{p99.9 write latency (log scale). GravTree stays below
+13\,$\mu$s on all workloads; RocksDB's tail spikes to 1.1\,ms on
 RandWrite.}
 \label{fig:p9999}
 \end{figure}

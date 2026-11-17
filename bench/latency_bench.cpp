@@ -84,17 +84,18 @@ struct Stats {
     double throughput_mops;   // million ops/sec
 };
 
-static Stats compute(std::vector<uint64_t>& v, double elapsed_sec = 0.0) {
-    std::sort(v.begin(), v.end());
-    size_t n = v.size();
+static Stats compute(const std::vector<uint64_t>& v, double elapsed_sec = 0.0) {
+    std::vector<uint64_t> s(v);
+    std::sort(s.begin(), s.end());   // sort a copy: `v` stays in op order for the time-series
+    size_t n = s.size();
     auto p = [&](double pct) {
         size_t i = static_cast<size_t>(pct * n);
-        return static_cast<double>(v[std::min(i, n - 1)]);
+        return static_cast<double>(s[std::min(i, n - 1)]);
     };
-    double sum = std::accumulate(v.begin(), v.end(), 0.0);
+    double sum = std::accumulate(s.begin(), s.end(), 0.0);
     double tput = elapsed_sec > 0 ? (n / elapsed_sec / 1e6) : 0.0;
     return {p(.50), p(.90), p(.99), p(.999), p(.9999),
-            sum / n, static_cast<double>(v.back()), n, tput};
+            sum / n, static_cast<double>(s.back()), n, tput};
 }
 
 static void print_row(const std::string& label, Stats& s,
