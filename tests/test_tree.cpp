@@ -131,6 +131,9 @@ TEST_F(TreeTest, MultiLevelFlushAndReopen) {
             tree->remove(key);
             if (oracle.erase(key)) ++removed;
         }
+        // Two drains: the first may only split the root; the second pushes
+        // the root buffer down through a real LocalFlush.
+        tree->flush();
         tree->flush();
         auto st = tree->stats();
         fprintf(stderr, "nodes=%zu flush_ops=%zu splits=%zu widen=%zu\n",
