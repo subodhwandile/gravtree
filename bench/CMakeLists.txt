@@ -25,3 +25,8 @@ target_compile_definitions(gravtree_wa PRIVATE SPLINTERDB_PLATFORM_DIR=platform_
 set_target_properties(gravtree_wa PROPERTIES CXX_STANDARD 20)
 target_include_directories(gravtree_wa PRIVATE ${ROCKSDB_INCLUDE} /home/ubuntu/splinterdb/include)
 target_link_libraries(gravtree_wa gravtree_lib ${ROCKSDB_LIB} z bz2 snappy lz4 zstd /home/ubuntu/splinterdb/build/release/lib/libsplinterdb.a aio config xxhash pthread)
+
+add_executable(gravtree_crash crash_bench.cpp)
+set_target_properties(gravtree_crash PROPERTIES CXX_STANDARD 20)
+target_include_directories(gravtree_crash PRIVATE ${ROCKSDB_INCLUDE})
+target_link_libraries(gravtree_crash gravtree_lib ${ROCKSDB_LIB} z bz2 snappy lz4 zstd)

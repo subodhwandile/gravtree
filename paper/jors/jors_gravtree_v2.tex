@@ -135,6 +135,27 @@ differs from SplinterDB: nodes are immutable SSTable files rather than
 mutable B-tree pages, so crash recovery requires only an atomic manifest
 update and no write-ahead log for tree structure.
 
+\begin{table}[t]
+\centering
+\small
+\caption{Mechanistic comparison. GravTree trades mutable in-place
+pages and WAL durability for structural simplicity: one immutable file
+per node, no routing filters, and recovery by manifest rename.}
+\label{tab:design}
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{lccc}
+\toprule
+ & RocksDB & SplinterDB & GravTree \\
+\midrule
+Node storage & mutable files & mutable trunk pages & immutable SSTable \\
+Per-node routing filters & --- & yes & --- \\
+Write-ahead log & yes & yes & --- \\
+Crash recovery & WAL replay & WAL replay & manifest rename \\
+Per-flush I/O bound & $\Theta(S_i{+}S_{i+1})$ & node-local & $O(K{\cdot}B)$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
 \textbf{The stall characterisation problem.} For an LSM-tree at level
 $L_i$ with $S_i$ bytes of data, the worst-case compaction duration is
 $\Theta(S_i + S_{i+1})$, which grows with the dataset. For GravTree,
@@ -421,8 +442,10 @@ ruling out deadlock.
 
 \textbf{Durability limitation.} The current prototype does not maintain a
 write-ahead log (WAL) for the in-memory write buffer. A crash before
-\texttt{flush()} is called will lose writes buffered since the last flush.
-Adding a WAL is orthogonal to LocalFlush and is planned future work.
+\texttt{flush()} is called will lose writes buffered since the last flush
+— measured 91K of 10M keys in our kill-test run, versus zero for
+WAL-enabled RocksDB. Adding a WAL is orthogonal to LocalFlush and is
+planned future work.
 
 \textbf{ZNS SSD compatibility.} Zoned Namespace (ZNS) SSDs
 \citep{zns} require sequential per-zone writes and explicit reset before
@@ -546,10 +569,23 @@ cgroup v2 bandwidth cap of 50\,MB/s applied equally to both engines,
 RocksDB stalled 40 times for 16.5\,s in a 25.8\,s run (worst stall
 1.57\,s); GravTree under the same cap showed no mid-run stall window —
 its stall profile collapses into a single bounded drain at close
-(2.96\,s). SplinterDB under the same cap slowed 2.6$\times$ with no
+(2.96\,s). Tightening the cap to 25\,MB/s widens the divergence:
+RocksDB stalled 46 times totalling 45.8\,s — 82\% of its 56\,s
+RandWrite run, worst stall 2.85\,s — while GravTree completed the
+same workload in 56.8\,s with all waits bounded by single-node
+flushes. SplinterDB under the same cap slowed 2.6$\times$ with no
 stall spikes. SplinterDB's low write amplification is expected: its
 mutable trunk pages rewrite only touched sub-ranges, whereas GravTree
 rewrites whole immutable nodes.
+
+\textbf{Crash recovery.} With a writer killed mid-run (SIGKILL) after
+10M inserts, GravTree reopens in 0.2\,ms by reading the last
+committed manifest; RocksDB replays its write-ahead log in 55.2\,ms —
+a 276$\times$ reopen gap. The honest cost: GravTree loses the
+unflushed in-memory buffer (91K of 10M keys in this run, all
+recovered by RocksDB's WAL). Recovery speed versus buffered-write
+durability is an explicit trade-off of the no-WAL design
+(Table~\ref{tab:design}).
 
 \textbf{Read latency.} Point reads are GravTree's strongest result
 (Table~\ref{tab:read}): 3.4$\times$ lower p99, 10.9$\times$ lower
