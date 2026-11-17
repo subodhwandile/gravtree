@@ -14,7 +14,14 @@
 #include <iostream>
 #include <memory>
 #include <random>
+#include <sstream>
 #include <string>
+#include <rocksdb/statistics.h>
+
+extern "C" {
+#include <splinterdb/splinterdb.h>
+#include <splinterdb/default_data_config.h>
+}
 
 namespace fs = std::filesystem;
 using namespace gravtree;
@@ -36,7 +43,7 @@ static IoCounters read_io() {
 }
 
 int main(int argc, char** argv) {
-    if (argc < 3) { std::cerr << "usage: gravtree_wa <gt|rdb> <seq|rand> [N]\n"; return 2; }
+    if (argc < 3) { std::cerr << "usage: gravtree_wa <gt|rdb|sdb> <seq|rand> [N]\n"; return 2; }
     const std::string engine = argv[1], mode = argv[2];
     const size_t N = argc > 3 ? std::stoull(argv[3]) : 1'000'000;
     const std::string dir = "/tmp/gt_wa/" + engine + "_" + mode;
@@ -69,10 +76,29 @@ int main(int argc, char** argv) {
         }
         std::cout << "node_bytes_total=" << sum_lv << "\n";
         tree.reset();
+    } else if (engine == "sdb") {
+        data_config dcfg;
+        default_data_config_init(&dcfg);
+        splinterdb_config cfg{};
+        cfg.filename   = (dir + "/db").c_str();
+        cfg.disk_size  = 8ULL << 30;
+        cfg.cache_size = 512ULL << 20;
+        cfg.data_cfg   = &dcfg;
+        splinterdb* kvs = nullptr;
+        int rc = splinterdb_create(&cfg, &kvs);
+        if (rc) { std::cerr << "splinterdb_create rc=" << rc << "\n"; return 1; }
+        for (size_t i = 0; i < N; ++i) {
+            std::string k = key_at(i);
+            slice ks = slice_create(k.size(), k.data());
+            message mv = message_create(val.size(), val.data());
+            splinterdb_insert(kvs, ks, mv, nullptr);
+        }
+        splinterdb_close(&kvs, false);
     } else {
         rocksdb::Options o; o.create_if_missing = true; o.compression = rocksdb::kNoCompression;
         o.write_buffer_size = 4ULL << 20; o.max_write_buffer_number = 3;
         o.max_background_compactions = 1; o.max_background_flushes = 1;
+        o.statistics = rocksdb::CreateDBStatistics();
         rocksdb::DB* db_ptr = nullptr;
         rocksdb::Status s = rocksdb::DB::Open(o, dir, &db_ptr);
         std::unique_ptr<rocksdb::DB> db(db_ptr);
@@ -82,6 +108,16 @@ int main(int argc, char** argv) {
         db->Flush(rocksdb::FlushOptions{});
         // Wait for already-scheduled background compactions so their I/O is counted.
         db->WaitForCompact(rocksdb::WaitForCompactOptions{});
+        // Stall evidence: RocksDB's own stall histogram + tickers.
+        if (o.statistics) {
+            std::string stats = o.statistics->ToString();
+            std::istringstream ss(stats);
+            std::string line;
+            while (std::getline(ss, line))
+                if (line.find("stall") != std::string::npos ||
+                    line.find("STALL") != std::string::npos)
+                    std::cout << "rdb " << line << "\n";
+        }
         db.reset();
     }
     double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
