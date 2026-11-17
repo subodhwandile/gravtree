@@ -47,9 +47,9 @@ thread runs LocalFlush to push data down the tree. The engine includes
 per-node Bloom filters, atomic crash recovery via manifest rename, CRC-64
 integrity verification, and a two-level lock design that serialises
 readers against flush events, ensuring consistent pre- or post-flush
-visibility at all times. Benchmarked against RocksDB 11.8 at 10M operations,
-GravTree achieves p99.99 write latency below 20\,$\mu$s and 2.4$\times$
-higher point-read throughput. GravTree is intended for embedded storage
+visibility at all times. Benchmarked against RocksDB 8.10 and SplinterDB
+at 10M operations, GravTree achieves p99.99 write latency below
+20\,$\mu$s and 2.4$\times$ higher point-read throughput. GravTree is intended for embedded storage
 scenarios where write tail latency predictability is more important than
 raw write throughput: time-series databases, real-time analytics,
 edge-device storage, and storage systems research. Source code is
@@ -100,10 +100,14 @@ The main contributions of this work are:
     self-contained SSTable with an embedded Bloom filter and sparse
     index, enabling consistent per-node filtering and WAL-free crash
     recovery via atomic manifest rename.
-  \item \textbf{Empirical evaluation:} benchmarks against RocksDB 11.8
-    at 10M operations showing p99.99 write latency below 20\,$\mu$s and
-    2.4$\times$ higher point-read throughput, with zero write-stall
-    windows across all workloads.
+  \item \textbf{Empirical evaluation:} benchmarks against RocksDB 8.10
+    and SplinterDB at 10M operations showing p99.99 write latency below
+    20\,$\mu$s and 2.4$\times$ higher point-read throughput. Under
+    sustained random writes RocksDB recorded 26,560 write-stall events
+    totalling 30\,s (64\% of run time, worst stall 13.6\,ms); under a
+    50\,MB/s bandwidth cap it stalled 40 times totalling 16.5\,s.
+    GravTree's stall profile collapses to a single bounded drain at
+    close.
   \item \textbf{Open-source C++17 implementation:} $\sim$1,500 lines,
     no external dependencies, with a reproducible benchmark harness for
     comparing new storage engine designs.
@@ -516,13 +520,28 @@ ranges from 31\,$\mu$s (SeqWrite) to 2.1\,ms (RandWrite).
 
 \textbf{Throughput.} RocksDB sustains 21$\times$ (SeqWrite) to
 80$\times$ (RandWrite) more writes per second. Measured write
-amplification (bytes to \texttt{write(2)} via \texttt{/proc/self/io}
-divided by $N \cdot 120$\,B logical payload): at 10M, GravTree is
-9.4$\times$ sequential and \textbf{180$\times$} random (216\,GB for
-1.2\,GB payload) versus 1.0$\times$ and 10$\times$ for RocksDB. With
-uniformly random keys, every root flush touches all children, so each
-flush rewrites essentially the whole tree below it, and the rewrite
-volume grows with dataset size.
+amplification (bytes passed to the storage layer via
+\texttt{/proc/self/io} \texttt{write\_bytes} divided by $N \cdot
+120$\,B logical payload): at 10M keys with 20-byte keys and 100-byte
+values, GravTree measures 7.6$\times$ sequential and
+\textbf{16.0$\times$} random versus 0.96$\times$ and 10.9$\times$ for
+RocksDB, and $\approx$1.2$\times$ and $\approx$1.3$\times$ for
+SplinterDB. With uniformly random keys, every root flush touches all
+children, so each flush rewrites essentially the whole tree below it,
+and the rewrite volume grows with dataset size: measured random-write
+WA grows from 3.7$\times$ at 200K keys to 16.0$\times$ at 10M.
+
+\textbf{Write stalls.} On the 10M random-write run, RocksDB's own
+statistics report 26,560 write-stall events totalling 30.3\,s — 64\%
+of the 47.4\,s run — with a worst single stall of 13.6\,ms. Under a
+cgroup v2 bandwidth cap of 50\,MB/s applied equally to both engines,
+RocksDB stalled 40 times for 16.5\,s in a 25.8\,s run (worst stall
+1.57\,s); GravTree under the same cap showed no mid-run stall window —
+its stall profile collapses into a single bounded drain at close
+(2.96\,s). SplinterDB under the same cap slowed 2.6$\times$ with no
+stall spikes. SplinterDB's low write amplification is expected: its
+mutable trunk pages rewrite only touched sub-ranges, whereas GravTree
+rewrites whole immutable nodes.
 
 \textbf{Read latency.} Point reads are GravTree's strongest result
 (Table~\ref{tab:read}): 2.6$\times$ lower p99 and 2.4$\times$ higher
@@ -531,7 +550,8 @@ throughput on a dataset 30$\times$ larger than the write buffer.
 \textbf{Latency time-series.} GravTree exhibits no mid-run window above
 100\,$\mu$s on any workload (Table~\ref{tab:timeseries}). The one
 RocksDB excursion is a write stall of $\approx$1\,ms in the final
-pre-flush RandWrite window (ops 9.96M--9.98M).
+pre-flush RandWrite window (ops 9.96M--9.98M); at 10M random keys
+RocksDB's stall counters report 26,560 stall events totalling 30.3\,s.
 
 Figure~\ref{fig:p9999} plots p99.99 write latency for both engines on a
 log scale. GravTree stays below 20\,$\mu$s across all workloads; RocksDB
@@ -574,7 +594,8 @@ RandWrite.}
 \end{figure}
 
 \textbf{Discussion.} The dominant limitation is write throughput, driven
-by measured write amplification of 180$\times$ at 10M random keys. Three
+by measured write amplification of 16$\times$ at 10M random keys
+(growing with dataset size). Three
 engineering changes would close most of this gap: (i) parallel LocalFlush
 across disjoint children; (ii) delta files for internal nodes; and (iii)
 larger leaves with a smaller root buffer. Measurements were taken on a
@@ -691,8 +712,8 @@ No special hardware requirements. Benchmarks were run on a Linux VM with
 \section*{Dependencies}
 
 CMake $\geq$ 3.14. No external libraries are required. The benchmark
-suite links against RocksDB 11.8 (optional; required only for
-comparative benchmarks).
+suite links against RocksDB 8.10 and SplinterDB (optional; required
+only for comparative benchmarks).
 
 \section*{List of contributors}
 
@@ -745,8 +766,8 @@ raw write throughput. Concrete reuse scenarios include:
 \end{itemize}
 
 The primary limitation of the current prototype is write amplification:
-9.4$\times$ sequential and 180$\times$ random at 10M keys, due to
-whole-node rewrites on every LocalFlush. Planned future work includes
+7.6$\times$ sequential and 16$\times$ random at 10M keys — growing with
+dataset size — due to whole-node rewrites on every LocalFlush. Planned future work includes
 partial-node rewrites and parallel flush across sibling children to
 reduce this cost.
 
@@ -758,8 +779,8 @@ $B + K \cdot C_{\max}$, where $B$ is the buffer threshold and $C_{\max}$
 is the largest child SSTable — typically under 40\,MB for the default
 configuration.  Storage overhead is bounded by the on-disk tree plus one
 generation of retired files pending deletion after each flush; at 10M
-keys with 64-byte values, total on-disk footprint was approximately
-1.8$\times$ the raw data size.  Scalability is limited by the
+keys with 100-byte values, measured on-disk footprint was approximately
+1.2$\times$ the raw data size.  Scalability is limited by the
 whole-node-rewrite cost: write throughput degrades as the dataset grows
 and child SSTables become larger, making GravTree best suited to datasets
 in the range of tens of millions of keys.  For datasets requiring
