@@ -446,7 +446,13 @@ void GravTree::do_flush(NodeId parent_id) {
         SSTNode& child = it->second;
         if (!child.buffer_full()) continue;
         if (child.is_leaf() && child.num_children == 0) {
-            split_leaf(cid, {parent_id, cid});
+            // A prior split may have invalidated parent_id itself (internal
+            // split). Re-resolve the leaf's live path instead of trusting
+            // the snapshot, or the leaf ends up invalidated-but-orphaned and
+            // its dead id stays listed under the parent's successors.
+            auto path = path_to(cid);
+            if (path.size() < 2 || path.back() != cid) continue;
+            split_leaf(cid, path);
         } else if (child.num_children > 0) {
             do_flush(cid);
         }
@@ -495,6 +501,14 @@ void GravTree::split_leaf(NodeId leaf_id, const std::vector<NodeId>& path) {
         cache_[new_root_id] = std::move(new_root);
     } else {
         NodeId parent_id = path[path.size() - 2];
+        SSTNode& p = get_node(parent_id);
+        bool found = false;
+        for (uint32_t i = 0; i < p.num_children; ++i)
+            if (p.child_ids[i] == leaf_id) { found = true; break; }
+        if (!found)
+            fprintf(stderr,
+                    "split_leaf: leaf %llu not under supposed parent %llu\n",
+                    (unsigned long long)leaf_id, (unsigned long long)parent_id);
         insert_child(parent_id, fence_key, leaf_id, lid, rid);
     }
     manifest_->save();
@@ -595,6 +609,11 @@ void GravTree::insert_child(NodeId parent_id, const std::string& /*fence_key*/,
         rn.flush_to_disk(opts_.data_dir);
 
         std::vector<NodeId> path = path_to(pid);   // before invalidation
+        if (path.empty() || path.back() != pid)
+            fprintf(stderr,
+                    "insert_child: path_to(%llu) unreachable under root — "
+                    "path size %zu\n",
+                    (unsigned long long)pid, path.size());
         manifest_->invalidate_node(pid);
         manifest_->register_node(lid2, plevel, ln.file_path);
         manifest_->register_node(rid2, plevel, rn.file_path);
