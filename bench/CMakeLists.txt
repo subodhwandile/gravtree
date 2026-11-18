@@ -15,12 +15,18 @@ add_executable(gravtree_latency latency_bench.cpp)
 # RocksDB >= 11.8 public headers require C++20 (`using enum`).
 set_target_properties(gravtree_latency PROPERTIES CXX_STANDARD 20)
 target_include_directories(gravtree_latency PRIVATE ${ROCKSDB_INCLUDE})
-target_link_libraries(gravtree_latency gravtree_lib ${ROCKSDB_LIB})
+target_link_libraries(gravtree_latency gravtree_lib ${ROCKSDB_LIB} z bz2 snappy lz4 zstd)
 
 add_executable(gravtree_verify verify_bench.cpp)
 target_link_libraries(gravtree_verify gravtree_lib)
 
 add_executable(gravtree_wa wa_bench.cpp)
+target_compile_definitions(gravtree_wa PRIVATE SPLINTERDB_PLATFORM_DIR=platform_linux)
 set_target_properties(gravtree_wa PROPERTIES CXX_STANDARD 20)
-target_include_directories(gravtree_wa PRIVATE ${ROCKSDB_INCLUDE})
-target_link_libraries(gravtree_wa gravtree_lib ${ROCKSDB_LIB})
+target_include_directories(gravtree_wa PRIVATE ${ROCKSDB_INCLUDE} /home/ubuntu/splinterdb/include)
+target_link_libraries(gravtree_wa gravtree_lib ${ROCKSDB_LIB} z bz2 snappy lz4 zstd /home/ubuntu/splinterdb/build/release/lib/libsplinterdb.a aio config xxhash pthread)
+
+add_executable(gravtree_crash crash_bench.cpp)
+set_target_properties(gravtree_crash PROPERTIES CXX_STANDARD 20)
+target_include_directories(gravtree_crash PRIVATE ${ROCKSDB_INCLUDE})
+target_link_libraries(gravtree_crash gravtree_lib ${ROCKSDB_LIB} z bz2 snappy lz4 zstd)
